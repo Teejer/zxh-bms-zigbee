@@ -216,7 +216,7 @@ void zxh_pack_finalize_values(zxh_pack_t *p)
         p->values.cell_mv[pos++] = (uint8_t)(mv >> 8);
         p->values.cell_mv[pos++] = (uint8_t)(mv & 0xFF);
     }
-    p->values.voltage_cV = (uint16_t)sum; /* centivolts = millivolts/10 */
+    p->values.voltage_cV = (uint16_t)(sum / 10u); /* mV -> centivolts */
     p->values.cell_min_mv = lo;
     p->values.cell_max_mv = hi;
     p->values.cell_delta_mv = (uint16_t)(hi - lo);
