@@ -1,0 +1,6 @@
+# Single factory app (no OTA: firmware updates happen over USB like any
+# Zigbee DIY node). zb_fct is the ZBOSS factory-settings partition — required.
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+zb_fct,   data, fat,     0x10000, 0x1000,
+factory,  app,  factory, 0x20000, 0x1E0000,
