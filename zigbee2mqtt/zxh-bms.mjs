@@ -9,7 +9,9 @@
 // The firmware pushes an explicit attribute report for every value after
 // each BLE poll cycle, so no configureReporting is required.
 
+import {Zcl} from 'zigbee-herdsman';
 import {access as ea, presets as e} from 'zigbee-herdsman-converters/lib/exposes';
+import * as reporting from 'zigbee-herdsman-converters/lib/reporting';
 
 export const MAX_PACKS = 5; // must match the firmware build
 
@@ -22,6 +24,33 @@ const ATTR = {
     cellCount: 0x000f, protection: 0x0010, equilibrium: 0x0011,
     cellMv: 0x0012, online: 0x0013,
 };
+
+// ZCL data type per attribute (must match firmware add_attr types)
+const TYPES = {
+    0x0001: Zcl.DataType.UINT16, 0x0002: Zcl.DataType.INT16, 0x0003: Zcl.DataType.INT16,
+    0x0004: Zcl.DataType.UINT8, 0x0005: Zcl.DataType.UINT16, 0x0006: Zcl.DataType.UINT16,
+    0x0007: Zcl.DataType.UINT16, 0x0008: Zcl.DataType.INT16, 0x0009: Zcl.DataType.INT16,
+    0x000a: Zcl.DataType.INT16, 0x000b: Zcl.DataType.UINT16, 0x000c: Zcl.DataType.UINT8,
+    0x000d: Zcl.DataType.UINT16, 0x000e: Zcl.DataType.UINT16, 0x000f: Zcl.DataType.UINT8,
+    0x0010: Zcl.DataType.BITMAP16, 0x0011: Zcl.DataType.UINT32,
+    0x0012: Zcl.DataType.OCTET_STR, 0x0013: Zcl.DataType.UINT8,
+};
+
+// Register the custom cluster so herdsman can name it and decode reports.
+try {
+    Zcl.Utils.registerCluster({
+        ID: ZXH_CLUSTER,
+        name: 'ZXHBMS',
+        manufacturerCodeSpecific: false,
+        attributes: Object.fromEntries(
+            Object.keys(ATTR).map((k) => [k, {ID: ATTR[k], type: TYPES[ATTR[k]]}]),
+        ),
+        commands: {},
+        commandsResponse: {},
+    });
+} catch {
+    /* already registered */
+}
 
 // Protection bitmask (bit index -> label), matching the bms-cli project.
 const PROTECTION = {
@@ -51,36 +80,39 @@ function decodeCells(buf) {
 
 const fz = {
     zxbms: {
-        cluster: ZXH_CLUSTER,
+        cluster: 'ZXHBMS',
         type: ['attributeReport', 'readResponse'],
         convert: (model, msg, publish, options, meta) => {
-            const d = msg.data;
+            // With the cluster registered herdsman keys by name; also accept raw IDs.
+            const d = {};
+            for (const [k, id] of Object.entries(ATTR)) d[k] = msg.data[k] ?? msg.data[id];
             const r = {};
-            if (ATTR.voltage in d) r.voltage = d[ATTR.voltage] / 100;
-            if (ATTR.current in d) r.current = d[ATTR.current] / 100;
-            if (ATTR.power in d) r.power = d[ATTR.power];
-            if (ATTR.soc in d) r.soc = d[ATTR.soc];
-            if (ATTR.cellMin in d) r.cell_min = d[ATTR.cellMin];
-            if (ATTR.cellMax in d) r.cell_max = d[ATTR.cellMax];
-            if (ATTR.cellDelta in d) r.cell_delta = d[ATTR.cellDelta];
-            if (ATTR.mosTemp in d) r.mos_temperature = d[ATTR.mosTemp] / 10;
-            if (ATTR.temp1 in d) r.temperature_1 = d[ATTR.temp1] / 10;
-            if (ATTR.temp2 in d) r.temperature_2 = d[ATTR.temp2] / 10;
-            if (ATTR.cycles in d) r.cycles = d[ATTR.cycles];
-            if (ATTR.health in d) r.health = d[ATTR.health];
-            if (ATTR.capacity in d) r.capacity = d[ATTR.capacity] / 10;
-            if (ATTR.fullCap in d) r.full_capacity = d[ATTR.fullCap] / 10;
-            if (ATTR.cellCount in d) r.cell_count = d[ATTR.cellCount];
-            if (ATTR.protection in d) {
-                r.protection = d[ATTR.protection];
-                r.protection_state = protectionNames(d[ATTR.protection]);
+            const has = (k) => d[k] !== undefined;
+            if (has('voltage')) r.voltage = d.voltage / 100;
+            if (has('current')) r.current = d.current / 100;
+            if (has('power')) r.power = d.power;
+            if (has('soc')) r.soc = d.soc;
+            if (has('cellMin')) r.cell_min = d.cellMin;
+            if (has('cellMax')) r.cell_max = d.cellMax;
+            if (has('cellDelta')) r.cell_delta = d.cellDelta;
+            if (has('mosTemp')) r.mos_temperature = d.mosTemp / 10;
+            if (has('temp1')) r.temperature_1 = d.temp1 / 10;
+            if (has('temp2')) r.temperature_2 = d.temp2 / 10;
+            if (has('cycles')) r.cycles = d.cycles;
+            if (has('health')) r.health = d.health;
+            if (has('capacity')) r.capacity = d.capacity / 10;
+            if (has('fullCap')) r.full_capacity = d.fullCap / 10;
+            if (has('cellCount')) r.cell_count = d.cellCount;
+            if (has('protection')) {
+                r.protection = d.protection;
+                r.protection_state = protectionNames(d.protection);
             }
-            if (ATTR.equilibrium in d) {
-                r.equilibrium = d[ATTR.equilibrium];
-                r.balancing = d[ATTR.equilibrium] !== 0;
+            if (has('equilibrium')) {
+                r.equilibrium = d.equilibrium;
+                r.balancing = d.equilibrium !== 0;
             }
-            if (ATTR.cellMv in d) r.cells = decodeCells(d[ATTR.cellMv]);
-            if (ATTR.online in d) r.online = d[ATTR.online] === 1;
+            if (has('cellMv')) r.cells = decodeCells(d.cellMv);
+            if (has('online')) r.online = d.online === 1;
             return r;
         },
     },
@@ -128,6 +160,25 @@ const definition = {
             if (ep.ID >= 1 && ep.ID <= MAX_PACKS) map[ep.ID] = `pack_${ep.ID}`;
         }
         return map;
+    },
+    configure: async (device, coordinatorEndpoint, logger) => {
+        // Bind + configureReporting: lets the stack push values on change at
+        // every BLE poll. (The device also sends unsolicited reports; this
+        // makes the standard path work too.)
+        for (const ep of device.endpoints) {
+            if (ep.ID < 1 || ep.ID > MAX_PACKS) continue;
+            await reporting.bind(ep, coordinatorEndpoint, ['ZXHBMS']);
+            await ep.configureReporting(
+                'ZXHBMS',
+                Object.values(ATTR).map((attrId) => ({
+                    attribute: attrId,
+                    dataType: TYPES[attrId],
+                    minimumReportInterval: 1,
+                    maximumReportInterval: 300,
+                    reportableChange: 0,
+                })),
+            );
+        }
     },
 };
 

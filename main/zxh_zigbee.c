@@ -302,6 +302,8 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
             ATTR_CYCLES, ATTR_HEALTH, ATTR_CAPACITY, ATTR_FULL_CAP, ATTR_CELL_COUNT,
             ATTR_PROTECTION, ATTR_EQUILIBRIUM, ATTR_CELL_MV, ATTR_ONLINE,
         };
+        int errs = 0;
+        ezb_err_t first_err = EZB_ERR_NONE;
         for (size_t i = 0; i < sizeof(report_attrs) / sizeof(report_attrs[0]); i++) {
             ezb_zcl_report_attr_cmd_t cmd = {
                 .cmd_ctrl =
@@ -319,8 +321,17 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
                     },
                 .payload = {.attr_id = report_attrs[i]},
             };
-            ezb_zcl_report_attr_cmd_req(&cmd);
+            ezb_err_t ret = ezb_zcl_report_attr_cmd_req(&cmd);
+            if (ret != EZB_ERR_NONE) {
+                errs++;
+                if (first_err == EZB_ERR_NONE) first_err = ret;
+            }
         }
+        if (errs)
+            ESP_LOGW(TAG, "ep%d: %d/%zu report cmds failed, first err=0x%x", ep, errs,
+                     sizeof(report_attrs) / sizeof(report_attrs[0]), (unsigned) first_err);
+    } else {
+        ESP_LOGI(TAG, "ep%d published locally (not joined to a network yet, no reports sent)", ep);
     }
     esp_zigbee_lock_release();
 }
