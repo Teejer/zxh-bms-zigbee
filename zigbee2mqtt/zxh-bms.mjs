@@ -71,11 +71,12 @@ function protectionNames(bitmap) {
 }
 
 function decodeCells(buf) {
-    // octet string: [len][mv_hi, mv_lo] * n
+    // herdsman hands OCTET_STR values as a Buffer WITHOUT the ZCL length
+    // prefix: raw [mv_hi, mv_lo] * n
     if (!buf || !buf.length) return '';
-    const n = Math.min(Math.floor((buf[0] || buf.length - 1) / 2), 32);
+    const n = Math.min(Math.floor(buf.length / 2), 32);
     const cells = [];
-    for (let i = 0; i < n; i++) cells.push(buf[1 + 2 * i] * 256 + buf[2 + 2 * i]);
+    for (let i = 0; i < n; i++) cells.push(buf[2 * i] * 256 + buf[2 * i + 1]);
     return cells.join(',');
 }
 
