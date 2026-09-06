@@ -1,56 +1,54 @@
 // zigbee2mqtt external converter for the ZXH-BMS multi-pack gateway.
 //
 // Install: save as `external_converters/zxh-bms.mjs` next to your
-// configuration.yaml (z2m >= 2.11 also needs `external_converters` enabled:
-// https://www.zigbee2mqtt.io/guide/configuration/all-settings.html#enable-external-js),
-// set MAX_PACKS below to match ZXH_PACK_COUNT in the firmware zxh_config.h,
-// restart z2m, then pair (or re-interview) the gateway device.
+// configuration.yaml, set MAX_PACKS to match the firmware's ZXH_PACK_COUNT
+// in zxh_config.h, restart z2m, then (device page -> Dev console or General
+// tab) hit "Reconfigure" (or re-interview) once so bindings land.
 //
-// The firmware pushes an explicit attribute report for every value after
-// each BLE poll cycle, so no configureReporting is required.
+// z2m >= 2.11: external converters must be enabled (enable_external_js).
 
 import {Zcl} from 'zigbee-herdsman';
+import {deviceAddCustomCluster} from 'zigbee-herdsman-converters/lib/modernExtend';
 import {access as ea, presets as e} from 'zigbee-herdsman-converters/lib/exposes';
 import * as reporting from 'zigbee-herdsman-converters/lib/reporting';
 
 export const MAX_PACKS = 5; // must match the firmware build
 
 const ZXH_CLUSTER = 0xff10;
+
+// attr id -> [name, zcl type] (must match firmware's zxh_zigbee.c)
 const ATTR = {
-    voltage: 0x0001, current: 0x0002, power: 0x0003, soc: 0x0004,
-    cellMin: 0x0005, cellMax: 0x0006, cellDelta: 0x0007,
-    mosTemp: 0x0008, temp1: 0x0009, temp2: 0x000a,
-    cycles: 0x000b, health: 0x000c, capacity: 0x000d, fullCap: 0x000e,
-    cellCount: 0x000f, protection: 0x0010, equilibrium: 0x0011,
-    cellMv: 0x0012, online: 0x0013,
+    0x0001: ['voltage', Zcl.DataType.UINT16], // centivolts
+    0x0002: ['current', Zcl.DataType.INT16], // centiamperes
+    0x0003: ['power', Zcl.DataType.INT16], // watts
+    0x0004: ['soc', Zcl.DataType.UINT8],
+    0x0005: ['cellMin', Zcl.DataType.UINT16],
+    0x0006: ['cellMax', Zcl.DataType.UINT16],
+    0x0007: ['cellDelta', Zcl.DataType.UINT16],
+    0x0008: ['mosTemp', Zcl.DataType.INT16],
+    0x0009: ['temp1', Zcl.DataType.INT16],
+    0x000a: ['temp2', Zcl.DataType.INT16],
+    0x000b: ['cycles', Zcl.DataType.UINT16],
+    0x000c: ['health', Zcl.DataType.UINT8],
+    0x000d: ['capacity', Zcl.DataType.UINT16], // 0.1 Ah remaining
+    0x000e: ['fullCap', Zcl.DataType.UINT16],
+    0x000f: ['cellCount', Zcl.DataType.UINT8],
+    0x0010: ['protection', Zcl.DataType.BITMAP16],
+    0x0011: ['equilibrium', Zcl.DataType.UINT32],
+    0x0012: ['cellMv', Zcl.DataType.OCTET_STR],
+    0x0013: ['online', Zcl.DataType.UINT8],
 };
 
-// ZCL data type per attribute (must match firmware add_attr types)
-const TYPES = {
-    0x0001: Zcl.DataType.UINT16, 0x0002: Zcl.DataType.INT16, 0x0003: Zcl.DataType.INT16,
-    0x0004: Zcl.DataType.UINT8, 0x0005: Zcl.DataType.UINT16, 0x0006: Zcl.DataType.UINT16,
-    0x0007: Zcl.DataType.UINT16, 0x0008: Zcl.DataType.INT16, 0x0009: Zcl.DataType.INT16,
-    0x000a: Zcl.DataType.INT16, 0x000b: Zcl.DataType.UINT16, 0x000c: Zcl.DataType.UINT8,
-    0x000d: Zcl.DataType.UINT16, 0x000e: Zcl.DataType.UINT16, 0x000f: Zcl.DataType.UINT8,
-    0x0010: Zcl.DataType.BITMAP16, 0x0011: Zcl.DataType.UINT32,
-    0x0012: Zcl.DataType.OCTET_STR, 0x0013: Zcl.DataType.UINT8,
+const clusterDefinition = {
+    ID: ZXH_CLUSTER,
+    name: 'ZXHBMS',
+    manufacturerCode: null,
+    attributes: Object.fromEntries(
+        Object.entries(ATTR).map(([id, [name, type]]) => [name, {ID: Number(id), type}]),
+    ),
+    commands: {},
+    commandsResponse: {},
 };
-
-// Register the custom cluster so herdsman can name it and decode reports.
-try {
-    Zcl.Utils.registerCluster({
-        ID: ZXH_CLUSTER,
-        name: 'ZXHBMS',
-        manufacturerCodeSpecific: false,
-        attributes: Object.fromEntries(
-            Object.keys(ATTR).map((k) => [k, {ID: ATTR[k], type: TYPES[ATTR[k]]}]),
-        ),
-        commands: {},
-        commandsResponse: {},
-    });
-} catch {
-    /* already registered */
-}
 
 // Protection bitmask (bit index -> label), matching the bms-cli project.
 const PROTECTION = {
@@ -83,9 +81,7 @@ const fz = {
         cluster: 'ZXHBMS',
         type: ['attributeReport', 'readResponse'],
         convert: (model, msg, publish, options, meta) => {
-            // With the cluster registered herdsman keys by name; also accept raw IDs.
-            const d = {};
-            for (const [k, id] of Object.entries(ATTR)) d[k] = msg.data[k] ?? msg.data[id];
+            const d = msg.data;
             const r = {};
             const has = (k) => d[k] !== undefined;
             if (has('voltage')) r.voltage = d.voltage / 100;
@@ -151,6 +147,7 @@ const definition = {
     model: 'ZXH-BMS-1',
     vendor: 'zxh',
     description: `ZXH BMS multi-pack gateway (${MAX_PACKS} LiFePO4 packs over BLE, one Zigbee endpoint each)`,
+    extend: [deviceAddCustomCluster('ZXHBMS', clusterDefinition)],
     fromZigbee: [fz.zxbms],
     toZigbee: [],
     exposes: [].concat(...Array.from({length: MAX_PACKS}, (_, i) => packExposes(i + 1))),
@@ -162,17 +159,16 @@ const definition = {
         return map;
     },
     configure: async (device, coordinatorEndpoint, logger) => {
-        // Bind + configureReporting: lets the stack push values on change at
-        // every BLE poll. (The device also sends unsolicited reports; this
-        // makes the standard path work too.)
+        // Bind + configureReporting: the stack then pushes values on every
+        // change (i.e. every BLE poll). The firmware also sends unsolicited
+        // reports, so this is belt-and-braces.
         for (const ep of device.endpoints) {
             if (ep.ID < 1 || ep.ID > MAX_PACKS) continue;
             await reporting.bind(ep, coordinatorEndpoint, ['ZXHBMS']);
             await ep.configureReporting(
                 'ZXHBMS',
-                Object.values(ATTR).map((attrId) => ({
-                    attribute: attrId,
-                    dataType: TYPES[attrId],
+                Object.entries(ATTR).map(([attrId, [name]]) => ({
+                    attribute: name,
                     minimumReportInterval: 1,
                     maximumReportInterval: 300,
                     reportableChange: 0,
