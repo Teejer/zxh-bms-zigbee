@@ -264,6 +264,11 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
             /* Keep BLE off the shared radio so the z2m interview and
              * configureReporting downlinks can actually reach us. */
             zxh_ble_pause(90000);
+            /* Second announce well after the interview window: if z2m's
+             * first interview round failed (stale TC entry after a
+             * remove/rejoin), this refreshes routing again so the automatic
+             * re-interview lands. */
+            esp_timer_start_once(annce_timer, 20 * 1000);
             schedule_selftest();
         } else {
             ESP_LOGI(TAG, "No network joinable yet, retrying in 5s");
@@ -482,6 +487,7 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
 /* --- task ------------------------------------------------------------------- */
 
 /* Runs the sentinel sweep a few seconds after joining, off the ZBOSS task. */
+#if ZXH_SELFTEST_REPORTS
 static void selftest_task(void *arg)
 {
     (void)arg;
@@ -489,11 +495,14 @@ static void selftest_task(void *arg)
     zxh_zigbee_selftest_reports();
     vTaskDelete(NULL);
 }
+#endif
 
 static void schedule_selftest(void)
 {
     full_pending_mask = (1u << (unsigned)ep_count) - 1u;
+#if ZXH_SELFTEST_REPORTS
     xTaskCreate(selftest_task, "zxh_self", 3072, NULL, 3, NULL);
+#endif
 }
 
 /* --- status LED (WS2812 on ZXH_RGB_LED_GPIO) --------------------------------- */

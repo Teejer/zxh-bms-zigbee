@@ -39,6 +39,11 @@ static const zxh_pack_cfg_t ZXH_PACKS[] = {
  * (interview/config/reads) interleave. */
 #define ZXH_REPORT_GAP_MS 20
 
+/* 1 = after every join, push sentinel reports (voltage=439.81V, soc=126) to
+ * all endpoints to prove the report path. Noisy during interviews; enable
+ * only for diagnostics. */
+#define ZXH_SELFTEST_REPORTS 0
+
 /* BLE: unreachable packs re-attempt after this backoff (shorter than the
  * poll interval, but each attempt now blocks the shared radio for ~6 s). */
 
