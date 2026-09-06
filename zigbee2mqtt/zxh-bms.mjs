@@ -176,11 +176,12 @@ const definition = {
     fromZigbee: [fz.zxbms],
     toZigbee: [],
     exposes: [].concat(...Array.from({length: MAX_PACKS}, (_, i) => packExposes(i + 1))),
-    endpoint: (device) => {
+    // hc 26 signature: name -> numeric endpoint id ({pack_1: 1}, not
+    // {1: 'pack_1'}). The reversed (legacy) shape silently disables the
+    // suffix, so state keys stop matching the *_pack_N exposes.
+    endpoint: () => {
         const map = {};
-        for (const ep of device.endpoints) {
-            if (ep.ID >= 1 && ep.ID <= MAX_PACKS) map[ep.ID] = `pack_${ep.ID}`;
-        }
+        for (let i = 1; i <= MAX_PACKS; i++) map[`pack_${i}`] = i;
         return map;
     },
     configure: async (device, coordinatorEndpoint) => {
