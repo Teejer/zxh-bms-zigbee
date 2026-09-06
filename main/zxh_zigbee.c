@@ -295,16 +295,46 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
     set_attr(ep, ATTR_CELL_MV, &s->cell_mv);
     set_attr(ep, ATTR_ONLINE, &s->online);
 
+    /* Report only attributes whose value actually changed (or everything
+     * once, right after joining). Keeps z2m/coordinator chatter down. */
+    static attr_store_t last_sent[ZXH_MAX_PACKS];
+    static bool joined_was;
+    bool full = joined && !joined_was;
+    joined_was = joined;
+    attr_store_t *last = &last_sent[idx];
+
+    struct {
+        uint16_t attr;
+        const void *cur;
+        const void *prev;
+        size_t size;
+    } fields[] = {
+        {ATTR_VOLTAGE, &s->voltage, &last->voltage, sizeof(s->voltage)},
+        {ATTR_CURRENT, &s->current, &last->current, sizeof(s->current)},
+        {ATTR_POWER, &s->power, &last->power, sizeof(s->power)},
+        {ATTR_SOC, &s->soc, &last->soc, sizeof(s->soc)},
+        {ATTR_CELL_MIN, &s->cell_min, &last->cell_min, sizeof(s->cell_min)},
+        {ATTR_CELL_MAX, &s->cell_max, &last->cell_max, sizeof(s->cell_max)},
+        {ATTR_CELL_DELTA, &s->cell_delta, &last->cell_delta, sizeof(s->cell_delta)},
+        {ATTR_MOS_TEMP, &s->mos_temp, &last->mos_temp, sizeof(s->mos_temp)},
+        {ATTR_TEMP1, &s->temp1, &last->temp1, sizeof(s->temp1)},
+        {ATTR_TEMP2, &s->temp2, &last->temp2, sizeof(s->temp2)},
+        {ATTR_CYCLES, &s->cycles, &last->cycles, sizeof(s->cycles)},
+        {ATTR_HEALTH, &s->health, &last->health, sizeof(s->health)},
+        {ATTR_CAPACITY, &s->capacity, &last->capacity, sizeof(s->capacity)},
+        {ATTR_FULL_CAP, &s->full, &last->full, sizeof(s->full)},
+        {ATTR_CELL_COUNT, &s->cell_count, &last->cell_count, sizeof(s->cell_count)},
+        {ATTR_PROTECTION, &s->protection, &last->protection, sizeof(s->protection)},
+        {ATTR_EQUILIBRIUM, &s->equilibrium, &last->equilibrium, sizeof(s->equilibrium)},
+        {ATTR_CELL_MV, s->cell_mv, last->cell_mv, sizeof(s->cell_mv)},
+        {ATTR_ONLINE, &s->online, &last->online, sizeof(s->online)},
+    };
+
     if (joined) {
-        static const uint16_t report_attrs[] = {
-            ATTR_VOLTAGE, ATTR_CURRENT, ATTR_POWER,  ATTR_SOC,      ATTR_CELL_MIN,
-            ATTR_CELL_MAX, ATTR_CELL_DELTA, ATTR_MOS_TEMP, ATTR_TEMP1, ATTR_TEMP2,
-            ATTR_CYCLES, ATTR_HEALTH, ATTR_CAPACITY, ATTR_FULL_CAP, ATTR_CELL_COUNT,
-            ATTR_PROTECTION, ATTR_EQUILIBRIUM, ATTR_CELL_MV, ATTR_ONLINE,
-        };
-        int errs = 0;
+        int sent = 0, errs = 0;
         ezb_err_t first_err = EZB_ERR_NONE;
-        for (size_t i = 0; i < sizeof(report_attrs) / sizeof(report_attrs[0]); i++) {
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+            if (!full && memcmp(fields[i].cur, fields[i].prev, fields[i].size) == 0) continue;
             ezb_zcl_report_attr_cmd_t cmd = {
                 .cmd_ctrl =
                     {
@@ -319,20 +349,22 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
                                 .dis_default_rsp = true,
                             },
                     },
-                .payload = {.attr_id = report_attrs[i]},
+                .payload = {.attr_id = (uint16_t) fields[i].attr},
             };
             ezb_err_t ret = ezb_zcl_report_attr_cmd_req(&cmd);
+            sent++;
             if (ret != EZB_ERR_NONE) {
                 errs++;
                 if (first_err == EZB_ERR_NONE) first_err = ret;
             }
         }
-        if (errs)
-            ESP_LOGW(TAG, "ep%d: %d/%zu report cmds failed, first err=0x%x", ep, errs,
-                     sizeof(report_attrs) / sizeof(report_attrs[0]), (unsigned) first_err);
+        ESP_LOGI(TAG, "ep%d: reported %d attrs, %d failed (first err 0x%x)", ep, sent, errs,
+                 (unsigned) first_err);
+        if (errs) ESP_LOGW(TAG, "ep%d: report failures", ep);
     } else {
-        ESP_LOGI(TAG, "ep%d published locally (not joined to a network yet, no reports sent)", ep);
+        ESP_LOGI(TAG, "ep%d published locally (not joined yet, no reports sent)", ep);
     }
+    memcpy(last, s, sizeof(*s));
     esp_zigbee_lock_release();
 }
 
