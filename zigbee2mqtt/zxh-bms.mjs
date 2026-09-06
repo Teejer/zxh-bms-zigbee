@@ -114,8 +114,7 @@ const fz = {
     },
 };
 
-function packExposes(n) {
-    const ep = `pack_${n}`;
+function packExposes(n) {    const ep = `pack_${n}`;
     const num = (name, unit) => e.numeric(name, ea.STATE).withEndpoint(ep).withUnit(unit);
     return [
         num('voltage', 'V'),
@@ -142,12 +141,29 @@ function packExposes(n) {
     ];
 }
 
+// Register the custom cluster on the herdsman Device object. The decoder for
+// incoming frames reads `device.customClusters`, and it is NOT populated
+// reliably by the extend alone: onEvent('start') only runs on z2m boot, and
+// configure() runs after the first frames may already have arrived. Call it
+// everywhere cheap; the method is idempotent.
+function registerCluster(device) {
+    try {
+        device.addCustomCluster('ZXHBMS', clusterDefinition);
+    } catch (e) {
+        // already registered / concurrent — safe to ignore
+    }
+}
+
 const definition = {
     zigbeeModel: ['ZXH-BMS'],
     model: 'ZXH-BMS-1',
     vendor: 'zxh',
     description: `ZXH BMS multi-pack gateway (${MAX_PACKS} LiFePO4 packs over BLE, one Zigbee endpoint each)`,
     extend: [deviceAddCustomCluster('ZXHBMS', clusterDefinition)],
+    onEvent: {
+        start: (type, data, device) => registerCluster(device),
+        message: (type, data, device) => registerCluster(device),
+    },
     fromZigbee: [fz.zxbms],
     toZigbee: [],
     exposes: [].concat(...Array.from({length: MAX_PACKS}, (_, i) => packExposes(i + 1))),
@@ -159,21 +175,30 @@ const definition = {
         return map;
     },
     configure: async (device, coordinatorEndpoint, logger) => {
-        // Bind + configureReporting: the stack then pushes values on every
-        // change (i.e. every BLE poll). The firmware also sends unsolicited
-        // reports, so this is belt-and-braces.
+        registerCluster(device);
+        // The firmware pushes changed attributes on its own, so bind +
+        // configureReporting are best-effort reliability, not a hard
+        // requirement. Never throw: a failing endpoint (e.g. during a
+        // rejoin) used to mark the whole configure as failed and put z2m
+        // into endless retry attempts.
+        const attrs = Object.entries(ATTR).map(([attrId, [name]]) => ({
+            attribute: name,
+            minimumReportInterval: 1,
+            maximumReportInterval: 300,
+            reportableChange: 0,
+        }));
         for (const ep of device.endpoints) {
             if (ep.ID < 1 || ep.ID > MAX_PACKS) continue;
-            await reporting.bind(ep, coordinatorEndpoint, ['ZXHBMS']);
-            await ep.configureReporting(
-                'ZXHBMS',
-                Object.entries(ATTR).map(([attrId, [name]]) => ({
-                    attribute: name,
-                    minimumReportInterval: 1,
-                    maximumReportInterval: 300,
-                    reportableChange: 0,
-                })),
-            );
+            try {
+                await reporting.bind(ep, coordinatorEndpoint, ['ZXHBMS']);
+                await ep.configureReporting('ZXHBMS', attrs);
+                logger.info(`zxh-bms: reporting configured on endpoint ${ep.ID}`);
+            } catch (e) {
+                logger.warn(
+                    `zxh-bms: endpoint ${ep.ID} configure failed (${e.message}); ` +
+                    `device self-reports on change, retry will follow`,
+                );
+            }
         }
     },
 };

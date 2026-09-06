@@ -31,8 +31,25 @@ static const zxh_pack_cfg_t ZXH_PACKS[] = {
 
 /* Polling: how often each pack is refreshed. */
 #define ZXH_POLL_INTERVAL_S 300      /* seconds between polls of one pack */
-#define ZXH_CONNECT_TIMEOUT_MS 15000 /* give up connecting after this     */
+#define ZXH_CONNECT_TIMEOUT_MS 6000 /* give up connecting after this       */
 #define ZXH_CYCLE_TIMEOUT_MS 90000   /* give up a stalled read cycle      */
 
-/* BLE scan window between connection attempts. */
-#define ZXH_SCAN_TIMEOUT_MS 6000
+/* Minimum gap between consecutive Zigbee attribute-report frames. Keeps the
+ * single shared radio from flooding the coordinator and lets downlinks
+ * (interview/config/reads) interleave. */
+#define ZXH_REPORT_GAP_MS 20
+
+/* BLE: unreachable packs re-attempt after this backoff (shorter than the
+ * poll interval, but each attempt now blocks the shared radio for ~6 s). */
+
+/* Hold a BOOT button for 5 seconds WHILE RUNNING (do NOT hold it during
+ * boot - that enters the ROM download mode) to factory-reset the Zigbee
+ * stack: leave network, wipe saved state, join fresh on the next
+ * permit-join window. The LED blinks orange while holding. On the
+ * nanoESP32-C6 BOOT (SW3) is GPIO0; GPIO9 also checked for other devkits. */
+#define ZXH_ZB_RESET_GPIO 0
+#define ZXH_ZB_RESET_GPIO2 9
+
+/* WS2812 status LED (nanoESP32-C6 v1.0: addressable RGB on GPIO8).
+ * Blinks red while not joined to a Zigbee network, solid green once joined. */
+#define ZXH_RGB_LED_GPIO 8

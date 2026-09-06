@@ -15,11 +15,17 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
+#include "driver/rmt_tx.h"
+#include "driver/rmt_encoder.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_zigbee.h"
 
 #include "zxh_config.h"
 #include "zxh_proto.h"
+#include "zxh_ble.h"
 #include "zxh_zigbee.h"
 
 static const char *TAG = "zxh_zb";
@@ -70,6 +76,7 @@ typedef struct {
 static attr_store_t store[ZXH_MAX_PACKS];
 static bool joined;
 static esp_timer_handle_t steer_timer;
+static esp_timer_handle_t annce_timer;
 static volatile bool steer_armed;
 static int ep_count;
 
@@ -118,7 +125,7 @@ esp_err_t zxh_zigbee_create_device(void)
 
         ezb_zcl_basic_cluster_server_config_t basic_cfg = {
             .zcl_version = EZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
-            .power_source = EZB_ZCL_BASIC_POWER_SOURCE_BATTERY,
+            .power_source = EZB_ZCL_BASIC_POWER_SOURCE_DC_SOURCE,
         };
         ezb_zcl_cluster_desc_t basic = ezb_zcl_basic_create_cluster_desc(&basic_cfg, EZB_ZCL_CLUSTER_SERVER);
         ezb_zcl_basic_cluster_desc_add_attr(basic, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ZXH_MFG_ID);
@@ -191,6 +198,30 @@ static void schedule_steering_retry(void)
     esp_timer_start_once(steer_timer, 5000 * 1000);
 }
 
+static void zb_factory_reset_now(void)
+{
+    ESP_LOGW(TAG, "BOOT held 5s: factory resetting Zigbee stack "
+                  "(remove device in z2m, open pairing, I will rejoin)");
+    joined = false;
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    ezb_bdb_reset_via_local_action();
+    esp_zigbee_lock_release();
+    schedule_steering_retry();
+}
+
+static void annce_timer_cb(void *arg)
+{
+    (void)arg;
+    /* ZBOSS does not device_announce after a passive rejoin ("Rejoined
+     * stored network"), so the coordinator keeps stale addressing and every
+     * downlink (interview/config/bind) times out. Announce explicitly. */
+    const ezb_zdo_device_annce_req_t req = {0};
+    esp_zigbee_lock_acquire(portMAX_DELAY);
+    const ezb_err_t ret = ezb_zdo_device_annce_req(&req);
+    esp_zigbee_lock_release();
+    ESP_LOGI(TAG, "Device announce sent (refresh coordinator routes): 0x%02x", ret);
+}
+
 static bool app_signal_handler(const ezb_app_signal_t *app_signal)
 {
     ezb_app_signal_type_t type = ezb_app_signal_get_type(app_signal);
@@ -214,6 +245,8 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
         } else {
             ESP_LOGI(TAG, "Rejoined stored network");
             joined = true;
+            zxh_ble_pause(60000); /* let configure + first reports through */
+            esp_timer_start_once(annce_timer, 2000 * 1000);
         }
         break;
     }
@@ -223,6 +256,9 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
             joined = true;
             ESP_LOGI(TAG, "Joined network, short address 0x%04hx, channel %d",
                      ezb_nwk_get_short_address(), ezb_nwk_get_current_channel());
+            /* Keep BLE off the shared radio so the z2m interview and
+             * configureReporting downlinks can actually reach us. */
+            zxh_ble_pause(90000);
         } else {
             ESP_LOGI(TAG, "No network joinable yet, retrying in 5s");
             schedule_steering_retry();
@@ -335,6 +371,14 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
         ezb_err_t first_err = EZB_ERR_NONE;
         for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
             if (!full && memcmp(fields[i].cur, fields[i].prev, fields[i].size) == 0) continue;
+            /* Pace reports so we don't flood the radio / coordinator, and
+             * release the lock around the pause so pending downlinks
+             * (interview, configReport, reads) can interleave. */
+            if (sent) {
+                esp_zigbee_lock_release();
+                vTaskDelay(pdMS_TO_TICKS(ZXH_REPORT_GAP_MS));
+                esp_zigbee_lock_acquire(portMAX_DELAY);
+            }
             ezb_zcl_report_attr_cmd_t cmd = {
                 .cmd_ctrl =
                     {
@@ -370,6 +414,87 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
 
 /* --- task ------------------------------------------------------------------- */
 
+/* --- status LED (WS2812 on ZXH_RGB_LED_GPIO) --------------------------------- */
+
+#if ZXH_RGB_LED_GPIO >= 0
+static rmt_channel_handle_t rgb_chan;
+static rmt_encoder_handle_t rgb_enc;
+
+static void rgb_set(uint8_t r, uint8_t g, uint8_t b)
+{
+    const uint8_t grb[3] = {g, r, b};
+    const rmt_transmit_config_t tx = {.loop_count = 0};
+    if (rmt_transmit(rgb_chan, rgb_enc, grb, sizeof(grb), &tx) == ESP_OK) {
+        rmt_tx_wait_all_done(rgb_chan, portMAX_DELAY);
+    }
+}
+
+static void led_task(void *arg)
+{
+    (void)arg;
+    const rmt_tx_channel_config_t ch_cfg = {
+        .gpio_num = ZXH_RGB_LED_GPIO,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10000000, /* 100 ns per tick -> WS2812 bit shapes */
+        .mem_block_symbols = 48,
+        .trans_queue_depth = 2,
+    };
+    if (rmt_new_tx_channel(&ch_cfg, &rgb_chan) != ESP_OK) {
+        ESP_LOGW(TAG, "RGB LED init failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    const rmt_bytes_encoder_config_t enc_cfg = {
+        .bit0 = {.duration0 = 4, .duration1 = 8, .level0 = 1, .level1 = 0},
+        .bit1 = {.duration0 = 8, .duration1 = 4, .level0 = 1, .level1 = 0},
+        .flags.msb_first = 1,
+    };
+    if (rmt_new_bytes_encoder(&enc_cfg, &rgb_enc) != ESP_OK || rmt_enable(rgb_chan) != ESP_OK) {
+        ESP_LOGW(TAG, "RGB LED encoder init failed");
+        vTaskDelete(NULL);
+        return;
+    }
+    bool on = false;
+    int tick = 0;
+    int hold = 0;
+    bool fired = false;
+    const gpio_config_t io = {
+        .pin_bit_mask = (1ULL << ZXH_ZB_RESET_GPIO) | (1ULL << ZXH_ZB_RESET_GPIO2),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+    for (;;) {
+        const bool pressed = !gpio_get_level(ZXH_ZB_RESET_GPIO) ||
+                             !gpio_get_level(ZXH_ZB_RESET_GPIO2);
+        if (pressed) {
+            hold++;
+            if (hold == 50 && !fired) {
+                zb_factory_reset_now(); /* BOOT held 5 s: fresh rejoin */
+                fired = true;
+            }
+        } else {
+            hold = 0;
+            fired = false;
+        }
+        if (hold > 0 && hold < 52) {
+            rgb_set(((tick / 2) % 2) ? 40 : 20, ((tick / 2) % 2) ? 20 : 40, 0); /* orange fast blink */
+        } else if (joined) {
+            rgb_set(0, 40, 0); /* joined: solid dim green */
+        } else {
+            if (++tick >= 5) { /* not joined: red blink at 1 Hz */
+                tick = 0;
+                on = !on;
+            }
+            rgb_set(on ? 40 : 0, 0, 0);
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+#endif /* ZXH_RGB_LED_GPIO >= 0 */
+
 static void zigbee_task(void *arg)
 {
     esp_zigbee_config_t config = {
@@ -398,6 +523,8 @@ static void zigbee_task(void *arg)
 
     const esp_timer_create_args_t timer_cfg = {.callback = steer_timer_cb, .name = "zxh_steer"};
     ESP_ERROR_CHECK(esp_timer_create(&timer_cfg, &steer_timer));
+    const esp_timer_create_args_t annce_cfg = {.callback = annce_timer_cb, .name = "zxh_annce"};
+    ESP_ERROR_CHECK(esp_timer_create(&annce_cfg, &annce_timer));
 
     ESP_ERROR_CHECK(esp_zigbee_start(false));
     ESP_LOGI(TAG, "Zigbee router started (%d endpoints)", ep_count);
@@ -407,5 +534,8 @@ static void zigbee_task(void *arg)
 void zxh_zigbee_start(void)
 {
     ep_count = ZXH_PACK_COUNT > ZXH_MAX_PACKS ? ZXH_MAX_PACKS : ZXH_PACK_COUNT;
+#if ZXH_RGB_LED_GPIO >= 0
+    xTaskCreate(led_task, "zxh_led", 3072, NULL, 2, NULL);
+#endif
     xTaskCreate(zigbee_task, "zxh_zb", 8192, NULL, 5, NULL);
 }

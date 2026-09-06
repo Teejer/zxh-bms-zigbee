@@ -65,6 +65,7 @@ static uint32_t search_at;
 static uint8_t remote_bda[6];
 
 static uint32_t attempt_deadline, connect_deadline, cycle_deadline, slot_free_ms;
+static uint32_t quiet_until_ms; /* BLE paused (Zigbee commissioning) until */
 static uint32_t now_ms(void) { return xTaskGetTickCount() * portTICK_PERIOD_MS; }
 
 /* --- GATT profiles, same order/UUIDs as the CLI + ESPHome component ------- */
@@ -335,6 +336,7 @@ static void start_next_cycle(void)
 {
     uint32_t now = now_ms();
     if (now < slot_free_ms) return;
+    if (now < quiet_until_ms) return; /* radio reserved for Zigbee */
 
     int best = -1;
     uint32_t best_due = UINT32_MAX;
@@ -507,6 +509,13 @@ static void ble_task(void *arg)
 
         vTaskDelay(pdMS_TO_TICKS(20));
     }
+}
+
+void zxh_ble_pause(uint32_t ms)
+{
+    uint32_t until = now_ms() + ms;
+    if ((int32_t)(until - quiet_until_ms) > 0) quiet_until_ms = until;
+    ESP_LOGI(TAG, "BLE paused for %lu ms (Zigbee commissioning)", (unsigned long)ms);
 }
 
 void zxh_ble_start(void)

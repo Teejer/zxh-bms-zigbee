@@ -17,5 +17,7 @@ void app_main(void)
     ESP_LOGI(TAG, "ZXH-BMS Zigbee gateway: BLE battery reader -> zigbee2mqtt");
 
     zxh_zigbee_start();
+#ifndef ZXH_DISABLE_BLE
     zxh_ble_start();
+#endif
 }
