@@ -160,9 +160,15 @@ const definition = {
     vendor: 'zxh',
     description: `ZXH BMS multi-pack gateway (${MAX_PACKS} LiFePO4 packs over BLE, one Zigbee endpoint each)`,
     extend: [deviceAddCustomCluster('ZXHBMS', clusterDefinition)],
-    onEvent: {
-        start: (type, data, device) => registerCluster(device),
-        message: (type, data, device) => registerCluster(device),
+    onEvent: (event) => {
+        // hc 26 signature: single handler receiving {type, data:{device}}.
+        // Must run on start (each z2m boot — customClusters are not
+        // persisted) and again after interview/announce so freshly paired
+        // devices decode immediately.
+        const dev = event?.data?.device;
+        if (dev && ['start', 'deviceInterview', 'deviceAnnounce', 'deviceJoined'].includes(event.type)) {
+            registerCluster(dev);
+        }
     },
     fromZigbee: [fz.zxbms],
     toZigbee: [],
@@ -174,13 +180,13 @@ const definition = {
         }
         return map;
     },
-    configure: async (device, coordinatorEndpoint, logger) => {
+    configure: async (device, coordinatorEndpoint) => {
         registerCluster(device);
-        // The firmware pushes changed attributes on its own, so bind +
-        // configureReporting are best-effort reliability, not a hard
-        // requirement. Never throw: a failing endpoint (e.g. during a
-        // rejoin) used to mark the whole configure as failed and put z2m
-        // into endless retry attempts.
+        // NOTE: the hc configure signature is (device, coordinatorEndpoint,
+        // definition) — the third arg is NOT a logger (my earlier bug). The
+        // device firmware pushes changed attributes on its own, so bind +
+        // configureReporting are best-effort reliability only; never throw,
+        // or z2m retries configure forever.
         const attrs = Object.entries(ATTR).map(([attrId, [name]]) => ({
             attribute: name,
             minimumReportInterval: 1,
@@ -191,13 +197,13 @@ const definition = {
             if (ep.ID < 1 || ep.ID > MAX_PACKS) continue;
             try {
                 await reporting.bind(ep, coordinatorEndpoint, ['ZXHBMS']);
-                await ep.configureReporting('ZXHBMS', attrs);
-                logger.info(`zxh-bms: reporting configured on endpoint ${ep.ID}`);
             } catch (e) {
-                logger.warn(
-                    `zxh-bms: endpoint ${ep.ID} configure failed (${e.message}); ` +
-                    `device self-reports on change, retry will follow`,
-                );
+                // no coordinator binding; device unicasts reports anyway
+            }
+            try {
+                await ep.configureReporting('ZXHBMS', attrs);
+            } catch (e) {
+                // not fatal: firmware self-reports on change
             }
         }
     },

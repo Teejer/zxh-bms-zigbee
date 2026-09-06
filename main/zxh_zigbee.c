@@ -78,6 +78,7 @@ static bool joined;
 static esp_timer_handle_t steer_timer;
 static esp_timer_handle_t annce_timer;
 static volatile bool steer_armed;
+static uint32_t full_pending_mask; /* packs that must send all attrs once */
 static int ep_count;
 
 #define ZXH_ALL_CHANNELS_MASK 0x07FFF800U /* Zigbee channels 11-26 */
@@ -222,6 +223,9 @@ static void annce_timer_cb(void *arg)
     ESP_LOGI(TAG, "Device announce sent (refresh coordinator routes): 0x%02x", ret);
 }
 
+static bool app_signal_handler(const ezb_app_signal_t *app_signal);
+static void schedule_selftest(void);
+
 static bool app_signal_handler(const ezb_app_signal_t *app_signal)
 {
     ezb_app_signal_type_t type = ezb_app_signal_get_type(app_signal);
@@ -247,6 +251,7 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
             joined = true;
             zxh_ble_pause(60000); /* let configure + first reports through */
             esp_timer_start_once(annce_timer, 2000 * 1000);
+            schedule_selftest();
         }
         break;
     }
@@ -259,6 +264,7 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
             /* Keep BLE off the shared radio so the z2m interview and
              * configureReporting downlinks can actually reach us. */
             zxh_ble_pause(90000);
+            schedule_selftest();
         } else {
             ESP_LOGI(TAG, "No network joinable yet, retrying in 5s");
             schedule_steering_retry();
@@ -279,6 +285,66 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
 static void set_attr(uint8_t ep, uint16_t attr, void *val)
 {
     ezb_zcl_set_attr_value(ep, ZXH_CLUSTER_ID, EZB_ZCL_CLUSTER_SERVER, attr, EZB_ZCL_STD_MANUF_CODE, val, false);
+}
+
+/* Queue one unsolicited AttributeReport for (ep, attr) to the coordinator. */
+static ezb_err_t report_one(uint8_t ep, uint16_t attr)
+{
+    ezb_zcl_report_attr_cmd_t cmd = {
+        .cmd_ctrl =
+            {
+                .dst_addr = EZB_ADDRESS_SHORT(0x0000),
+                .dst_ep = 1,
+                .src_ep = ep,
+                .cluster_id = ZXH_CLUSTER_ID,
+                .manuf_code = EZB_ZCL_STD_MANUF_CODE,
+                .fc =
+                    {
+                        .direction = EZB_ZCL_CMD_DIRECTION_TO_CLI,
+                        .dis_default_rsp = true,
+                    },
+            },
+        .payload = {.attr_id = attr},
+    };
+    return ezb_zcl_report_attr_cmd_req(&cmd);
+}
+
+/* Diagnostic: after joining, push a distinctive sentinel (voltage=0xABCD,
+ * soc=0x7E, online=1) to every endpoint so z2m visibly updates all packs at
+ * once. Confirms the report path end to end; real polls overwrite it. */
+void zxh_zigbee_selftest_reports(void)
+{
+    if (!joined) {
+        ESP_LOGW(TAG, "self-test skipped: not joined");
+        return;
+    }
+    const uint16_t volt = 0xABCD;
+    const uint8_t soc = 0x7E, online = 1;
+    int sent = 0;
+    for (int i = 0; i < ep_count; i++) {
+        uint8_t ep = (uint8_t)(i + 1);
+        esp_zigbee_lock_acquire(portMAX_DELAY);
+        set_attr(ep, ATTR_VOLTAGE, (void *)&volt);
+        set_attr(ep, ATTR_SOC, (void *)&soc);
+        set_attr(ep, ATTR_ONLINE, (void *)&online);
+        ezb_err_t r1 = report_one(ep, ATTR_VOLTAGE);
+        esp_zigbee_lock_release();
+        vTaskDelay(pdMS_TO_TICKS(60));
+        esp_zigbee_lock_acquire(portMAX_DELAY);
+        ezb_err_t r2 = report_one(ep, ATTR_SOC);
+        esp_zigbee_lock_release();
+        vTaskDelay(pdMS_TO_TICKS(60));
+        esp_zigbee_lock_acquire(portMAX_DELAY);
+        ezb_err_t r3 = report_one(ep, ATTR_ONLINE);
+        esp_zigbee_lock_release();
+        if (r1 == EZB_ERR_NONE && r3 == EZB_ERR_NONE) sent++;
+        else ESP_LOGW(TAG, "selftest ep%d errs: volt 0x%x soc 0x%x online 0x%x",
+                      ep, (unsigned) r1, (unsigned) r2, (unsigned) r3);
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+    ESP_LOGW(TAG, "SELF-TEST: sent sentinel reports to %d/%d endpoints "
+                  "(expect voltage=439.81V soc=126 online=true in z2m)",
+             sent, ep_count);
 }
 
 void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
@@ -335,7 +401,7 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
      * once, right after joining). Keeps z2m/coordinator chatter down. */
     static attr_store_t last_sent[ZXH_MAX_PACKS];
     static bool joined_was;
-    bool full = joined && !joined_was;
+    bool full = (joined && !joined_was) || ((full_pending_mask >> idx) & 1u);
     joined_was = joined;
     attr_store_t *last = &last_sent[idx];
 
@@ -405,6 +471,7 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
         ESP_LOGI(TAG, "ep%d: reported %d attrs, %d failed (first err 0x%x)", ep, sent, errs,
                  (unsigned) first_err);
         if (errs) ESP_LOGW(TAG, "ep%d: report failures", ep);
+        full_pending_mask &= ~(1u << (unsigned)idx);
     } else {
         ESP_LOGI(TAG, "ep%d published locally (not joined yet, no reports sent)", ep);
     }
@@ -413,6 +480,21 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
 }
 
 /* --- task ------------------------------------------------------------------- */
+
+/* Runs the sentinel sweep a few seconds after joining, off the ZBOSS task. */
+static void selftest_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(8000));
+    zxh_zigbee_selftest_reports();
+    vTaskDelete(NULL);
+}
+
+static void schedule_selftest(void)
+{
+    full_pending_mask = (1u << (unsigned)ep_count) - 1u;
+    xTaskCreate(selftest_task, "zxh_self", 3072, NULL, 3, NULL);
+}
 
 /* --- status LED (WS2812 on ZXH_RGB_LED_GPIO) --------------------------------- */
 
