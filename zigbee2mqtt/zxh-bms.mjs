@@ -44,7 +44,10 @@ const clusterDefinition = {
     name: 'ZXHBMS',
     manufacturerCode: null,
     attributes: Object.fromEntries(
-        Object.entries(ATTR).map(([id, [name, type]]) => [name, {ID: Number(id), type}]),
+        // NOTE: the inner `name` matters — herdsman's attributeKeyValue
+        // converter keys decoded payloads by attribute.name, and without it
+        // reports/readResponses land as {"undefined": value}.
+        Object.entries(ATTR).map(([id, [name, type]]) => [name, {ID: Number(id), name, type}]),
     ),
     commands: {},
     commandsResponse: {},
