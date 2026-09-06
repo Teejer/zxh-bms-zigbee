@@ -271,13 +271,18 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
             esp_timer_start_once(annce_timer, 20 * 1000);
             schedule_selftest();
         } else {
-            ESP_LOGI(TAG, "No network joinable yet, retrying in 5s");
+            ESP_LOGI(TAG, "Steering failed, status 0x%02x, retrying in 5s", status);
             schedule_steering_retry();
         }
         break;
     }
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE:
         joined = true;
+        break;
+    case EZB_ZDO_SIGNAL_LEAVE:
+        ESP_LOGW(TAG, "Zigbee LEAVE signal received (kicked or self-left)");
+        joined = false;
+        schedule_steering_retry();
         break;
     default:
         break;
