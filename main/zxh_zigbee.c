@@ -78,6 +78,7 @@ static bool joined;
 static esp_timer_handle_t steer_timer;
 static esp_timer_handle_t annce_timer;
 static volatile bool steer_armed;
+static uint32_t steer_backoff_ms = 5000; /* grows after kicks, resets on join */
 static uint32_t full_pending_mask; /* packs that must send all attrs once */
 static int ep_count;
 
@@ -196,7 +197,7 @@ static void schedule_steering_retry(void)
 {
     if (steer_armed || joined) return;
     steer_armed = true;
-    esp_timer_start_once(steer_timer, 5000 * 1000);
+    esp_timer_start_once(steer_timer, (uint64_t)steer_backoff_ms * 1000);
 }
 
 static void zb_factory_reset_now(void)
@@ -249,7 +250,8 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
         } else {
             ESP_LOGI(TAG, "Rejoined stored network");
             joined = true;
-            zxh_ble_pause(60000); /* let configure + first reports through */
+            steer_backoff_ms = 5000;
+            zxh_ble_pause(120000); /* let configure + first reports through */
             esp_timer_start_once(annce_timer, 2000 * 1000);
             schedule_selftest();
         }
@@ -259,11 +261,13 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
         ezb_bdb_comm_status_t status = *(ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal);
         if (status == EZB_BDB_STATUS_SUCCESS) {
             joined = true;
+            steer_backoff_ms = 5000;
             ESP_LOGI(TAG, "Joined network, short address 0x%04hx, channel %d",
                      ezb_nwk_get_short_address(), ezb_nwk_get_current_channel());
             /* Keep BLE off the shared radio so the z2m interview and
-             * configureReporting downlinks can actually reach us. */
-            zxh_ble_pause(90000);
+             * configureReporting downlinks can actually reach us — the full
+             * interview + HA discovery + configure chain can take ~3 min. */
+            zxh_ble_pause(180000);
             /* Second announce well after the interview window: if z2m's
              * first interview round failed (stale TC entry after a
              * remove/rejoin), this refreshes routing again so the automatic
@@ -279,11 +283,17 @@ static bool app_signal_handler(const ezb_app_signal_t *app_signal)
     case EZB_ZDO_SIGNAL_DEVICE_ANNCE:
         joined = true;
         break;
-    case EZB_ZDO_SIGNAL_LEAVE:
+    case EZB_ZDO_SIGNAL_LEAVE: {
         ESP_LOGW(TAG, "Zigbee LEAVE signal received (kicked or self-left)");
         joined = false;
+        /* Usually z2m kicking us after a failed interview. Stay away long
+         * enough for it to settle, backing off harder on repeated kicks —
+         * rejoining within 2 s just restarts the doomed interview loop. */
+        if (steer_backoff_ms <= 5000) steer_backoff_ms = 30000;
+        else if (steer_backoff_ms < 300000) steer_backoff_ms *= 2;
         schedule_steering_retry();
         break;
+    }
     default:
         break;
     }
