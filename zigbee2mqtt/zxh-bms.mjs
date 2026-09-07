@@ -11,6 +11,7 @@ import {Zcl} from 'zigbee-herdsman';
 import {deviceAddCustomCluster} from 'zigbee-herdsman-converters/lib/modernExtend';
 import {access as ea, presets as e} from 'zigbee-herdsman-converters/lib/exposes';
 import * as reporting from 'zigbee-herdsman-converters/lib/reporting';
+import {postfixWithEndpointName} from 'zigbee-herdsman-converters/lib/utils';
 
 export const MAX_PACKS = 5; // must match the firmware build
 
@@ -113,7 +114,13 @@ const fz = {
             }
             if (has('cellMv')) r.cells = decodeCells(d.cellMv);
             if (has('online')) r.online = d.online === 1;
-            return r;
+            // z2m does NOT suffix state keys itself: every fz converter applies
+            // the per-endpoint postfix (`_pack_N`) via postfixWithEndpointName.
+            const out = {};
+            for (const [k, v] of Object.entries(r)) {
+                out[postfixWithEndpointName(k, msg, model, meta)] = v;
+            }
+            return out;
         },
     },
 };
@@ -163,6 +170,7 @@ const definition = {
     model: 'ZXH-BMS-1',
     vendor: 'zxh',
     description: `ZXH BMS multi-pack gateway (${MAX_PACKS} LiFePO4 packs over BLE, one Zigbee endpoint each)`,
+    meta: {multiEndpoint: true},
     extend: [deviceAddCustomCluster('ZXHBMS', clusterDefinition)],
     onEvent: (event) => {
         // hc 26 signature: single handler receiving {type, data:{device}}.
