@@ -55,6 +55,7 @@ static const char *TAG = "zxh_zb";
 #define ATTR_EQUILIBRIUM 0x0011  /* u32 bitmap       */
 #define ATTR_CELL_MV 0x0012      /* octr: len + BE u16 x N */
 #define ATTR_ONLINE 0x0013       /* u8               */
+#define ATTR_POLL_COUNT 0x0014   /* u32: successful reads since boot */
 
 typedef struct {
     uint16_t voltage;
@@ -71,6 +72,7 @@ typedef struct {
     uint32_t equilibrium;
     uint8_t cell_mv[66];
     uint8_t online;
+    uint32_t poll_count;
 } attr_store_t;
 
 static attr_store_t store[ZXH_MAX_PACKS];
@@ -159,6 +161,7 @@ esp_err_t zxh_zigbee_create_device(void)
         add_attr(custom, ATTR_EQUILIBRIUM, EZB_ZCL_ATTR_TYPE_UINT32, &s->equilibrium);
         add_attr(custom, ATTR_CELL_MV, EZB_ZCL_ATTR_TYPE_OCTSTR, &s->cell_mv);
         add_attr(custom, ATTR_ONLINE, EZB_ZCL_ATTR_TYPE_UINT8, &s->online);
+        add_attr(custom, ATTR_POLL_COUNT, EZB_ZCL_ATTR_TYPE_UINT32, &s->poll_count);
 
         ezb_af_ep_config_t ep_cfg = {
             .ep_id = (uint8_t)(i + 1),
@@ -394,6 +397,7 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
         s->protection = v->protection;
         s->equilibrium = v->equilibrium;
         memcpy(s->cell_mv, v->cell_mv, (size_t)v->cell_mv[0] + 1);
+        s->poll_count++;
     }
     s->online = online ? 1 : 0;
 
@@ -416,6 +420,7 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
     set_attr(ep, ATTR_EQUILIBRIUM, &s->equilibrium);
     set_attr(ep, ATTR_CELL_MV, &s->cell_mv);
     set_attr(ep, ATTR_ONLINE, &s->online);
+    set_attr(ep, ATTR_POLL_COUNT, &s->poll_count);
 
     /* Report only attributes whose value actually changed. After a device
      * reboot last_sent is zero, so the first poll of each pack sends
@@ -449,6 +454,7 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
         {ATTR_EQUILIBRIUM, &s->equilibrium, &last->equilibrium, sizeof(s->equilibrium)},
         {ATTR_CELL_MV, s->cell_mv, last->cell_mv, sizeof(s->cell_mv)},
         {ATTR_ONLINE, &s->online, &last->online, sizeof(s->online)},
+        {ATTR_POLL_COUNT, &s->poll_count, &last->poll_count, sizeof(s->poll_count)},
     };
 
     if (joined) {

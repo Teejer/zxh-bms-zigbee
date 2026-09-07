@@ -38,6 +38,7 @@ const ATTR = {
     0x0011: ['equilibrium', Zcl.DataType.UINT32],
     0x0012: ['cellMv', Zcl.DataType.OCTET_STR],
     0x0013: ['online', Zcl.DataType.UINT8],
+    0x0014: ['pollCount', Zcl.DataType.UINT32], // successful BLE reads since boot
 };
 
 const clusterDefinition = {
@@ -114,6 +115,12 @@ const fz = {
             }
             if (has('cellMv')) r.cells = decodeCells(d.cellMv);
             if (has('online')) r.online = d.online === 1;
+            if (has('pollCount')) {
+                // Changes on every successful BLE read, even when the pack
+                // data is identical -> reliable "last good scan" heartbeat.
+                r.poll_count = d.pollCount;
+                r.last_read = new Date().toISOString();
+            }
             // z2m does NOT suffix state keys itself: every fz converter applies
             // the per-endpoint postfix (`_pack_N`) via postfixWithEndpointName.
             const out = {};
@@ -149,6 +156,8 @@ function packExposes(n) {    const ep = `pack_${n}`;
         e.text('protection_state', ea.STATE).withEndpoint(ep),
         e.binary('balancing', ea.STATE, true, false).withEndpoint(ep),
         e.binary('online', ea.STATE, true, false).withEndpoint(ep),
+        e.text('last_read', ea.STATE).withEndpoint(ep),
+        e.numeric('poll_count', ea.STATE).withEndpoint(ep),
     ];
 }
 
