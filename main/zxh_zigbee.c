@@ -498,10 +498,12 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
                  (unsigned) first_err);
         if (errs) ESP_LOGW(TAG, "ep%d: report failures", ep);
         full_pending_mask &= ~(1u << (unsigned)idx);
+        memcpy(last, s, sizeof(*s));
     } else {
+        /* Not joined: do NOT touch last_sent, or changes that happen while
+         * offline would be marked as reported and never pushed on-line. */
         ESP_LOGI(TAG, "ep%d published locally (not joined yet, no reports sent)", ep);
     }
-    memcpy(last, s, sizeof(*s));
     esp_zigbee_lock_release();
 }
 
