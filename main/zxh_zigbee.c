@@ -417,12 +417,11 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
     set_attr(ep, ATTR_CELL_MV, &s->cell_mv);
     set_attr(ep, ATTR_ONLINE, &s->online);
 
-    /* Report only attributes whose value actually changed (or everything
-     * once, right after joining). Keeps z2m/coordinator chatter down. */
+    /* Report only attributes whose value actually changed. After a device
+     * reboot last_sent is zero, so the first poll of each pack sends
+     * everything — spread out per pack, never as one join-time burst. */
     static attr_store_t last_sent[ZXH_MAX_PACKS];
-    static bool joined_was;
-    bool full = (joined && !joined_was) || ((full_pending_mask >> idx) & 1u);
-    joined_was = joined;
+    bool full = (full_pending_mask >> idx) & 1u;
     attr_store_t *last = &last_sent[idx];
 
     struct {
@@ -484,8 +483,15 @@ void zxh_zigbee_publish_pack(int idx, const zxh_pack_t *pack, bool online)
             ezb_err_t ret = ezb_zcl_report_attr_cmd_req(&cmd);
             sent++;
             if (ret != EZB_ERR_NONE) {
+                /* Queue congested — drop the rest for this pack instead of
+                 * piling more onto a jammed APS queue; next poll retries. */
                 errs++;
                 if (first_err == EZB_ERR_NONE) first_err = ret;
+                esp_zigbee_lock_release();
+                if (joined) full_pending_mask &= ~(1u << (unsigned)idx);
+                ESP_LOGW(TAG, "ep%d: report queue busy (%d sent, first err 0x%x)", ep, sent,
+                         (unsigned) ret);
+                return;
             }
         }
         ESP_LOGI(TAG, "ep%d: reported %d attrs, %d failed (first err 0x%x)", ep, sent, errs,
@@ -514,8 +520,15 @@ static void selftest_task(void *arg)
 
 static void schedule_selftest(void)
 {
-    full_pending_mask = (1u << (unsigned)ep_count) - 1u;
+    /* NB: do NOT arm a full-attribute pass on join anymore — 19 attrs x 5
+     * endpoints collides with the z2m interview and jams the ZBOSS APS
+     * retry queue, whose 7.5 s retransmit storm then starves the BLE
+     * scheduler on the shared radio. Reports are strictly on-change now;
+     * after a reboot last_sent is zero so the first polls push everything
+     * naturally, spread across endpoints. */
+    (void)full_pending_mask;
 #if ZXH_SELFTEST_REPORTS
+    full_pending_mask = (1u << (unsigned)ep_count) - 1u;
     xTaskCreate(selftest_task, "zxh_self", 3072, NULL, 3, NULL);
 #endif
 }
